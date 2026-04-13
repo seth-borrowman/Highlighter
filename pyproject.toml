@@ -12,5 +12,8 @@ dependencies = ["biopython", "reportlab"]
 Homepage = "https://github.com/seth-borrowman/Highlighter"
 Issues = "https://github.com/seth-borrowman/Highlighter/issues"
 
+[tool.setuptools.packages.find]
+include = ["highlighter"]
+
 [tool.pytest.ini_options]
 testpaths = ["highlighter/Tests"]
