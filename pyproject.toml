@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "steuptools.backends.legacy:BuildBackend"
+
+[project]
+name = "highlighter"
+version = "0.1.0"
+description = "Plot point mutations and APOBEC signatures for a multisequence alignment"
+dependencies = ["biopython", "reportlab"]
+
+[project.urls]
+Homepage = "https://github.com/seth-borrowman/Highlighter"
+Issues = "https://github.com/seth-borrowman/Highlighter/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["highlighter/Tests"]
