@@ -1,3 +1,48 @@
+"""Highlighter plot tools for sequence alignment visualization.
+
+This module provides classes and utilities for identifying and visualizing
+mutations, mismatches, and sequence features in multiple sequence alignments.
+It extends the ``Bio.Align.AlignInfo`` and ``Bio.Graphics`` modules with
+highlighter-style plots commonly used in HIV/viral sequence analysis.
+
+Classes
+-------
+Highlighter
+    Extracts mismatch and match information from a multiple sequence alignment.
+HighlighterPlot
+    Renders alignment comparison plots as SVG or PDF using ReportLab.
+
+Functions
+---------
+codon_position
+    Determines the codon position of a residue, accounting for alignment gaps.
+
+Examples
+--------
+Basic mismatch analysis::
+
+    from Bio import AlignIO
+    from Bio.Align import AlignInfo
+
+    alignment = AlignIO.read("sequences.fasta", "fasta")
+    highlighter = AlignInfo.Highlighter(alignment, seq_type="NT")
+    mismatches = highlighter.list_mismatches(references=0, apobec=True)
+
+Generating a highlighter plot::
+
+    from Bio import Graphics
+
+    plot = Graphics.HighlighterPlot(alignment, seq_type="NT")
+    plot.draw_mismatches("output.svg", reference=0, apobec=True)
+
+Notes
+-----
+This module monkey-patches ``Bio.Align.AlignInfo``, ``Bio.Graphics``, and
+``Bio.SeqUtils`` to register its classes and functions into the Biopython
+namespace (e.g. ``AlignInfo.Highlighter``, ``Graphics.HighlighterPlot``,
+``SeqUtils.codon_position``).
+"""
+
 from functools import cache
 from typing import Union
 
@@ -8,10 +53,52 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
 class Highlighter:
-    """ Get mutation info from an alignment """
+    """Extract mismatch and match information from a multiple sequence alignment.
+
+    This class provides methods to identify positions in an alignment that
+    differ from a reference sequence, and to classify those differences by
+    type (e.g. nucleotide substitution, APOBEC signature, stop codon, or
+    N-linked glycosylation site). Results can be exported as structured text
+    or passed directly to :class:`HighlighterPlot` for visualization.
+
+    Parameters
+    ----------
+    alignment : list-like of SeqRecord
+        A multiple sequence alignment, typically produced by
+        ``Bio.AlignIO.read``.
+    seq_type : {'NT', 'AA'}
+        Sequence type. ``'NT'`` for nucleotide, ``'AA'`` for amino acid.
+        This parameter is required.
+    codon_offset : int, optional
+        Offset to apply when computing codon positions (default 0). Only
+        relevant for nucleotide alignments. The value is taken modulo 3.
+
+    Raises
+    ------
+    ValueError
+        If ``seq_type`` is not ``'NT'`` or ``'AA'``.
+
+    Examples
+    --------
+    >>> from Bio import AlignIO
+    >>> from Bio.Align import AlignInfo
+    >>> alignment = AlignIO.read("sequences.fasta", "fasta")
+    >>> h = AlignInfo.Highlighter(alignment, seq_type="NT")
+    >>> mismatches = h.list_mismatches(references=0)
+    """
 
     def __init__(self, alignment, *, seq_type: str=None, codon_offset: int=0):
-        """ Initialize the Mutations object """
+        """Initialize the Highlighter object.
+
+        Parameters
+        ----------
+        alignment : list-like of SeqRecord
+            A multiple sequence alignment.
+        seq_type : {'NT', 'AA'}
+            Sequence type. ``'NT'`` for nucleotide, ``'AA'`` for amino acid.
+        codon_offset : int, optional
+            Reading frame offset (default 0). Taken modulo 3.
+        """
 
         self.alignment = alignment
         self.codon_offet: int=codon_offset % 3
@@ -21,8 +108,24 @@ class Highlighter:
         else:
             self.seq_type = seq_type
         
-    def get_seq_index_by_id(self, id: str) -> str:
-        """ Get a sequence from the alignment by its id """
+    def get_seq_index_by_id(self, id: str) -> int:
+        """Return the index of a sequence in the alignment by its identifier.
+
+        Parameters
+        ----------
+        id : str
+            The sequence identifier to search for (matches ``SeqRecord.id``).
+
+        Returns
+        -------
+        int
+            Zero-based index of the matching sequence in the alignment.
+
+        Raises
+        ------
+        IndexError
+            If no sequence with the given identifier is found.
+        """
 
         for index, sequence in enumerate(self.alignment):
             if sequence.id == id:
@@ -31,7 +134,54 @@ class Highlighter:
         raise IndexError(f"Could not find sequence with id {id}")
 
     def list_mismatches(self, *, references: Union[int, str]=0, apobec: bool=False, g_to_a: bool=False, stop_codons: bool=False, glycosylation: bool=False, codon_offset: int=0) -> list[dict[str: list]]:
-        """ Get matches from a sequence and a reference sequence """
+        """Return per-sequence mismatch dictionaries relative to a reference.
+
+        Iterates over every sequence in the alignment and identifies positions
+        that differ from the designated reference sequence. Optionally
+        annotates biologically relevant mutation types.
+
+        Parameters
+        ----------
+        references : int or str, optional
+            The reference sequence, specified either as a zero-based alignment
+            index (int) or a sequence identifier (str). Defaults to ``0``
+            (the first sequence).
+        apobec : bool, optional
+            If ``True``, flag G→A substitutions consistent with APOBEC
+            editing (GA context, not followed by C). Only applies to
+            nucleotide alignments (default ``False``).
+        g_to_a : bool, optional
+            If ``True``, flag all G→A substitutions regardless of context.
+            Only applies to nucleotide alignments (default ``False``).
+        stop_codons : bool, optional
+            If ``True``, identify positions that introduce a stop codon
+            (TAA, TAG, or TGA). Only applies to nucleotide alignments
+            (default ``False``).
+        glycosylation : bool, optional
+            If ``True``, identify asparagine (N) residues in N-X-S/T sequons
+            that constitute potential N-linked glycosylation sites. Only
+            applies to amino acid alignments (default ``False``).
+        codon_offset : int, optional
+            Reading frame offset applied when detecting stop codons
+            (default ``0``).
+
+        Returns
+        -------
+        list of dict
+            One dictionary per sequence in the alignment. Each dictionary
+            maps zero-based alignment positions (int) to a list of
+            annotation strings. The first element of each list is the
+            residue at that position (or ``'Gap'`` for ``'-'``); subsequent
+            elements are one or more of ``'G->A mutation'``, ``'APOBEC'``,
+            ``'Stop codon'``, or ``'Glycosylation'``.
+
+        Raises
+        ------
+        TypeError
+            If ``references`` is not an int or str.
+        ValueError
+            If the reference sequence is empty.
+        """
 
         mismatches: list[dict[str: list]] = []
 
@@ -54,8 +204,44 @@ class Highlighter:
 
     @staticmethod
     def get_mismatches(*, sequence: Union[str, Seq, SeqRecord], references: Union[str, Seq, SeqRecord], seq_type: str=None, apobec: bool=False, g_to_a: bool=False, stop_codons: bool=False, glycosylation: bool=False, codon_offset: int=0) -> dict[int: list]:
-        """ Get mismatches from a sequence and a reference sequence 
-        returns a dictionary of mismatches where the key is the position of the mismatch and the value is a list of types of mismatches """
+        """Return a mismatch dictionary comparing one sequence to a reference.
+
+        Accepts ``str``, :class:`~Bio.Seq.Seq`, or
+        :class:`~Bio.SeqRecord.SeqRecord` inputs and normalises them before
+        delegating to :meth:`get_mismatches_from_str` (which is cached).
+
+        Parameters
+        ----------
+        sequence : str, Seq, or SeqRecord
+            The query sequence to compare against the reference.
+        references : str, Seq, or SeqRecord
+            The reference sequence. Must be the same length as ``sequence``.
+        seq_type : {'NT', 'AA'}
+            Sequence type. Required.
+        apobec : bool, optional
+            Flag APOBEC-signature G→A mutations (default ``False``).
+        g_to_a : bool, optional
+            Flag all G→A mutations (default ``False``).
+        stop_codons : bool, optional
+            Flag positions that introduce stop codons (default ``False``).
+        glycosylation : bool, optional
+            Flag N-linked glycosylation sequons (default ``False``).
+        codon_offset : int, optional
+            Reading frame offset for stop codon detection (default ``0``).
+
+        Returns
+        -------
+        dict
+            Maps zero-based alignment positions to annotation lists.
+            See :meth:`list_mismatches` for the list format.
+
+        Raises
+        ------
+        TypeError
+            If ``sequence`` or ``references`` is not a str, Seq, or SeqRecord.
+        ValueError
+            If ``seq_type`` is invalid, or if the sequences differ in length.
+        """
 
         if seq_type not in ("NT", "AA"):
             raise ValueError("type must be provided (either 'NT' or 'AA')")
@@ -82,8 +268,49 @@ class Highlighter:
     @staticmethod
     @cache
     def get_mismatches_from_str(*, sequence: str, references: str, seq_type: str, apobec: bool, g_to_a: bool, stop_codons: bool=False, glycosylation: bool, codon_offset: int=0) -> dict[int: list]:
-        """ Get mutations from a sequence and a reference sequence
-        separated out so it can be cached (Seq and SeqRecord are not hashable) """
+        """Return a mismatch dictionary from plain string inputs (cached).
+
+        This method contains the core comparison logic and is separated from
+        :meth:`get_mismatches` so that results can be cached using
+        :func:`functools.cache`. :class:`~Bio.Seq.Seq` and
+        :class:`~Bio.SeqRecord.SeqRecord` objects are not hashable and
+        therefore cannot be used as cache keys directly.
+
+        Parameters
+        ----------
+        sequence : str
+            The query sequence (gaps represented as ``'-'``).
+        references : str
+            The reference sequence. Must be the same length as ``sequence``.
+        seq_type : {'NT', 'AA'}
+            Sequence type.
+        apobec : bool
+            Flag APOBEC-signature G→A mutations.
+        g_to_a : bool
+            Flag all G→A mutations.
+        stop_codons : bool, optional
+            Flag positions that introduce stop codons (default ``False``).
+        glycosylation : bool
+            Flag N-linked glycosylation sequons.
+        codon_offset : int, optional
+            Reading frame offset for stop codon detection (default ``0``).
+
+        Returns
+        -------
+        dict
+            Maps zero-based alignment positions (int) to annotation lists.
+            Positions identical to the reference are omitted. Each list
+            begins with the residue character (or ``'Gap'``) and may include
+            any of ``'G->A mutation'``, ``'APOBEC'``, ``'Stop codon'``, or
+            ``'Glycosylation'``.
+
+        Notes
+        -----
+        Newline characters are stripped from both sequences before comparison.
+        Stop codon detection uses :func:`Bio.SeqUtils.codon_position` to
+        handle gap-adjusted reading frames. Glycosylation detection follows
+        the N-X-S/T sequon rule (where X is not proline).
+        """
 
         if seq_type not in ("NT", "AA"):
             raise ValueError("type must be provided (either 'NT' or 'AA')")
@@ -149,7 +376,39 @@ class Highlighter:
         return mismatches
     
     def export_mismatches(self, output_file, *, references: Union[int, str]=0, apobec: bool=False, g_to_a: bool=False, stop_codons: bool=False, glycosylation: bool=False, codon_offset: int=0) -> None:
-        """ Export mismatches to a .txt file"""
+        """Write mismatch annotations for all sequences to a text file.
+
+        For each sequence in the alignment the output lists the sequence
+        identifier followed by one line per annotation type giving the
+        (1-based) alignment positions where that type was observed.
+
+        Example output::
+
+            seq1
+            A [12 45 67]
+            Gap [103]
+
+            seq2
+            C [8]
+
+        Parameters
+        ----------
+        output_file : str or path-like
+            Destination file path. The file is written in text mode and
+            will be created or overwritten.
+        references : int or str, optional
+            Reference sequence index or identifier (default ``0``).
+        apobec : bool, optional
+            Flag APOBEC-signature G→A mutations (default ``False``).
+        g_to_a : bool, optional
+            Flag all G→A mutations (default ``False``).
+        stop_codons : bool, optional
+            Flag stop-codon-introducing positions (default ``False``).
+        glycosylation : bool, optional
+            Flag N-linked glycosylation sequons (default ``False``).
+        codon_offset : int, optional
+            Reading frame offset (default ``0``).
+        """
 
         output: str = ""
         mismatches = self.list_mismatches(references=references, apobec=apobec, g_to_a=g_to_a, stop_codons=stop_codons, glycosylation=glycosylation, codon_offset=codon_offset)
@@ -177,7 +436,42 @@ class Highlighter:
             file.write(output)
 
     def list_matches(self, *, references=0) -> list[dict[str: list]]:
-        """ Get matches from a sequence and a reference sequence """
+        """Return per-sequence match dictionaries relative to one or more references.
+
+        For each sequence, identifies positions that *match* at least one
+        reference and classifies them by which reference(s) they match.
+        Positions that match all references simultaneously are omitted
+        (they carry no discriminating information).
+
+        Parameters
+        ----------
+        references : int, str, Seq, or list thereof, optional
+            One or more reference sequences. Each entry may be:
+
+            - **int** – zero-based index into the alignment.
+            - **str** – sequence identifier (matched against ``SeqRecord.id``).
+            - **Seq** – a raw sequence object.
+
+            A single non-list value is wrapped in a list automatically.
+            Defaults to ``0`` (the first sequence).
+
+        Returns
+        -------
+        list of dict
+            One dictionary per sequence in the alignment. For reference
+            sequences the dictionary is empty. For all other sequences,
+            keys are zero-based alignment positions and values are lists
+            containing the zero-based index of every reference that shares
+            the same residue at that position, or ``['Unique']`` if no
+            reference matches.
+
+        Raises
+        ------
+        IndexError
+            If an integer reference index is out of range.
+        TypeError
+            If a reference entry is not an int, str, Seq, or dict.
+        """
 
         matches: list[dict[str: list]] = []
 
@@ -222,15 +516,36 @@ class Highlighter:
     
     @staticmethod
     def get_matches(*, sequence: Union[str, Seq, SeqRecord], references: Union[list[str, Seq, SeqRecord], str, Seq, SeqRecord], seq_type: str=None) -> dict[int: list]:
-        """ Get matches of a sequence to one or more reference sequences
-        returns a dictionary of matches where the key is the position of the match and the value is a list of types of matches 
-        
-        references can be:
-        int: index of a sequence in the alignment
-        str: id of a sequence in the alignment
-        Seq: a sequence object 
-        
-        or a list of the same"""
+        """Return a match dictionary comparing one sequence to one or more references.
+
+        Accepts ``str``, :class:`~Bio.Seq.Seq`, or
+        :class:`~Bio.SeqRecord.SeqRecord` inputs, normalises them to plain
+        strings, then delegates to :meth:`get_matches_from_str`.
+
+        Parameters
+        ----------
+        sequence : str, Seq, or SeqRecord
+            The query sequence.
+        references : str, Seq, SeqRecord, or list thereof
+            One or more reference sequences. All must be the same length as
+            ``sequence``. A single non-list value is wrapped automatically.
+        seq_type : {'NT', 'AA'}
+            Sequence type. Required.
+
+        Returns
+        -------
+        dict
+            Maps zero-based alignment positions to match annotation lists.
+            See :meth:`list_matches` for the list format. Positions where
+            the query matches *all* references are omitted.
+
+        Raises
+        ------
+        TypeError
+            If ``sequence`` or any reference is not a str, Seq, or SeqRecord.
+        ValueError
+            If ``seq_type`` is invalid or sequences differ in length.
+        """
         
         if seq_type not in ("NT", "AA"):
             raise ValueError("type must be provided (either 'NT' or 'AA')")
@@ -267,8 +582,31 @@ class Highlighter:
     @staticmethod
     @cache
     def get_matches_from_str(*, sequence: str, references: tuple[str], seq_type: str) -> dict[int: list]:
-        """ Get matches from a sequence and a reference sequence
-        separated out so it can be cached (Seq and SeqRecord are not hashable) """
+        """Return a match dictionary from plain string inputs (cached).
+
+        Separated from :meth:`get_matches` so results can be cached via
+        :func:`functools.cache`. References are passed as a tuple (rather
+        than a list) because tuples are hashable.
+
+        Parameters
+        ----------
+        sequence : str
+            The query sequence.
+        references : tuple of str
+            One or more reference sequences, all the same length as
+            ``sequence``.
+        seq_type : {'NT', 'AA'}
+            Sequence type.
+
+        Returns
+        -------
+        dict
+            Maps zero-based alignment positions to lists. Each list contains
+            the zero-based indices of references that match the query at that
+            position, or ``['Unique']`` if no reference matches. Positions
+            where the query matches *all* references are omitted. The ``'X'``
+            residue in a reference is treated as a wildcard.
+        """
 
         if seq_type not in ("NT", "AA"):
             raise ValueError("type must be provided (either 'NT' or 'AA')")
@@ -293,7 +631,35 @@ class Highlighter:
         return matches
     
     def export_matches(self, output_file, *, references: tuple[Union[int, str]]=0) -> None:
-        """ Export matches to a .txt file """
+        """Write match annotations for all sequences to a text file.
+
+        For each sequence the output lists the sequence identifier (with a
+        reference label where applicable) followed by one line per match
+        category giving the 1-based alignment positions.
+
+        Match categories:
+
+        - **R1, R2, …** – positions matching only that reference.
+        - **Multiple matches** – positions matching more than one reference.
+        - **Unique in query** – positions matching no reference.
+
+        Example output::
+
+            ref_seq (R1)
+            R1 [1 2 3 ...]
+
+            query_seq
+            R1 [5 12 20]
+            Unique in query [8 15]
+
+        Parameters
+        ----------
+        output_file : str or path-like
+            Destination file path. Written in text mode; created or
+            overwritten.
+        references : int, str, or tuple thereof, optional
+            Reference sequence(s) by index or identifier (default ``0``).
+        """
 
         output: str = ""
         matches = self.list_matches(references=references)
@@ -362,10 +728,92 @@ from Bio.Align import AlignInfo
 
 
 class HighlighterPlot:
-    """ Create and output a mutation plot """
+    """Render alignment comparison plots as SVG or PDF.
+
+    Produces highlighter-style figures in which each sequence is drawn as a
+    horizontal line and coloured marks indicate positions that differ from
+    (or match) a designated reference sequence. The visual style is modelled
+    on the Los Alamos National Laboratory (LANL) HIV sequence database
+    highlighter tool.
+
+    Two plot modes are supported:
+
+    - **Mismatch plot** – marks positions where a sequence differs from a
+      single reference, coloured by nucleotide or amino acid identity.
+    - **Match plot** – marks positions where a sequence matches one or more
+      references, coloured by which reference(s) are matched.
+
+    Parameters
+    ----------
+    alignment : list-like of SeqRecord
+        A multiple sequence alignment.
+    seq_type : {'NT', 'AA'}, optional
+        Sequence type. If not provided (or not ``'NT'``/``'AA'``), the type
+        is inferred automatically via :meth:`guess_alignment_type`.
+    tree : Bio.Phylo.BaseTree.Tree, optional
+        A phylogenetic tree used to order sequences when ``sort='tree'`` is
+        passed to a draw method.
+    plot_width : float, optional
+        Width of the sequence plot area in ReportLab units
+        (default ``4 * inch``).
+    seq_name_font : str, optional
+        Font name for sequence labels (default ``'Helvetica'``).
+    seq_name_font_size : int, optional
+        Font size for sequence labels in points (default ``8``).
+    seq_gap : int or None, optional
+        Vertical gap between sequence tracks in ReportLab units. If
+        ``None``, defaults to one-fifth of the track height.
+    left_margin : float, optional
+        Left margin in ReportLab units (default ``0.25 * inch``).
+    top_margin : float, optional
+        Top margin in ReportLab units (default ``0.25 * inch``).
+    bottom_margin : float, optional
+        Bottom margin in ReportLab units (default ``0``).
+    right_margin : float, optional
+        Right margin in ReportLab units (default ``0``).
+    plot_label_gap : float, optional
+        Gap between the right edge of the plot and the sequence labels
+        (default ``inch / 4``).
+    mark_reference : bool, optional
+        If ``True``, append a reference indicator (e.g. ``(r)``) to the
+        label of the reference sequence (default ``True``).
+    title_font : str, optional
+        Font name for the plot title (default ``'Helvetica'``).
+    title_font_size : int, optional
+        Font size for the plot title in points (default ``12``).
+    ruler : bool, optional
+        If ``True``, draw a ruler along the bottom of the plot
+        (default ``True``).
+    ruler_font : str, optional
+        Font name for ruler labels (default ``'Helvetica'``).
+    ruler_font_size : int, optional
+        Font size for ruler labels in points (default ``6``).
+    ruler_major_ticks : int, optional
+        Number of major tick marks on the ruler (default ``10``).
+    ruler_minor_ticks : int, optional
+        Number of minor ticks between each pair of major ticks (default ``3``).
+    codon_offset : int, optional
+        Reading frame offset for codon-based annotations (default ``0``).
+
+    Raises
+    ------
+    TypeError
+        If ``tree`` is not a ``Bio.Phylo.BaseTree.Tree`` instance.
+
+    Examples
+    --------
+    >>> from Bio import AlignIO, Graphics
+    >>> from reportlab.lib.units import inch
+    >>> alignment = AlignIO.read("sequences.fasta", "fasta")
+    >>> plot = Graphics.HighlighterPlot(alignment, seq_type="NT", plot_width=6*inch)
+    >>> plot.draw_mismatches("out.svg", reference=0, apobec=True)
+    """
 
     def __init__(self, alignment, *, seq_type: str=None, tree: Union[str, object]=None, plot_width: int = 4*inch, seq_name_font: str="Helvetica", seq_name_font_size: int=8, seq_gap: int=None, left_margin: float=.25*inch, top_margin: float=.25*inch, bottom_margin: float=0, right_margin: float=0, plot_label_gap: float=(inch/4), mark_reference: bool=True, title_font="Helvetica", title_font_size: int=12, ruler: bool=True, ruler_font: str="Helvetica", ruler_font_size: int=6, ruler_major_ticks: int=10, ruler_minor_ticks=3, codon_offset: int=0):
-        """ Initialize the MutationPlot object """
+        """Initialize the HighlighterPlot object.
+
+        See class docstring for parameter descriptions.
+        """
 
         self.alignment = alignment
         self.codon_offset = codon_offset % 3
@@ -468,7 +916,45 @@ class HighlighterPlot:
         }
 
     def _setup_drawing(self, *, plot_type: str, output_format: str="svg", title: str=None, sort: str="similar", mark_width: float=1, scale: float=1, sequence_labels: bool=True):
-        """ Setus up the drawing """
+        """Configure and initialise the ReportLab Drawing object.
+
+        Calculates overall figure dimensions, creates the
+        :class:`~reportlab.graphics.shapes.Drawing`, draws the title and
+        ruler (if enabled), adds sequence baselines, and resolves the
+        display order of sequences.
+
+        This method is called internally by :meth:`draw_mismatches` and
+        :meth:`draw_matches` before marks are rendered.
+
+        Parameters
+        ----------
+        plot_type : {'mismatch', 'match'}
+            Controls baseline colouring and reference-label logic.
+        output_format : str, optional
+            Output file format passed to ``Bio.Graphics._write``
+            (default ``'svg'``).
+        title : str or None, optional
+            Plot title drawn above the figure (default ``None``).
+        sort : {'similar', 'tree', 'none'}, optional
+            Sequence ordering strategy.  ``'similar'`` groups sequences by
+            similarity to the reference; ``'tree'`` uses the order of
+            terminals in the supplied phylogenetic tree; any other value
+            preserves the original alignment order (default ``'similar'``).
+        mark_width : float, optional
+            Fractional width of each mark relative to one alignment column
+            (default ``1``).
+        scale : float, optional
+            Uniform scaling factor applied to the output DPI (default ``1``).
+        sequence_labels : bool, optional
+            If ``True``, draw sequence identifiers to the right of the plot
+            (default ``True``).
+
+        Raises
+        ------
+        ValueError
+            If ``sort='tree'`` is requested but no tree was provided at
+            initialisation.
+        """
         
         self.plot_type: str = plot_type
         self.output_format: str = output_format
@@ -558,7 +1044,57 @@ class HighlighterPlot:
             self.drawing.add(sequence_baseline)
     
     def draw_mismatches(self, output_file, *, output_format: str="svg", title: str=None, reference: Union[str, int]=0, apobec: bool=False, g_to_a: bool=False, stop_codons: bool=False, glycosylation: bool=False, sort: str="similar", mark_width: float=1, scheme: str="LANL", scale: float=1, sequence_labels: bool=True):
-        """ Draw mismatches compared to a reference sequence """
+        """Generate a mismatch highlighter plot and write it to a file.
+
+        Each sequence track displays coloured marks at positions that differ
+        from the reference. Mark colour reflects the residue identity at that
+        position according to the chosen colour scheme. Optionally overlays
+        symbolic markers for APOBEC mutations (circles), G→A mutations
+        (diamonds), stop codons (blue diamonds), and gained/lost
+        glycosylation sites (diamonds).
+
+        Parameters
+        ----------
+        output_file : str or path-like
+            Destination file path.
+        output_format : str, optional
+            Output format string accepted by ``Bio.Graphics._write``, e.g.
+            ``'svg'``, ``'pdf'``, ``'png'`` (default ``'svg'``).
+        title : str or None, optional
+            Title drawn above the plot (default ``None``).
+        reference : int or str, optional
+            Reference sequence as an alignment index or sequence identifier
+            (default ``0``).
+        apobec : bool, optional
+            Overlay circle markers at APOBEC-signature G→A positions
+            (default ``False``).
+        g_to_a : bool, optional
+            Overlay diamond markers at all G→A positions (default ``False``).
+        stop_codons : bool, optional
+            Overlay blue diamond markers at stop-codon positions
+            (default ``False``).
+        glycosylation : bool, optional
+            Overlay markers at gained or lost glycosylation sequons
+            (default ``False``).
+        sort : {'similar', 'tree', 'none'}, optional
+            Sequence ordering strategy (default ``'similar'``).
+        mark_width : float, optional
+            Fractional mark width relative to one alignment column
+            (default ``1``).
+        scheme : str, optional
+            Named colour scheme for residue marks. Built-in options are
+            ``'LANL'`` and ``'ML'`` (default ``'LANL'``).
+        scale : float, optional
+            Output DPI scaling factor (default ``1``).
+        sequence_labels : bool, optional
+            Draw sequence identifiers to the right of the plot
+            (default ``True``).
+
+        Returns
+        -------
+        object
+            The return value of ``Bio.Graphics._write`` (format-dependent).
+        """
 
         self._mutations = AlignInfo.Highlighter(self.alignment, seq_type=self.seq_type)
         
@@ -582,7 +1118,26 @@ class HighlighterPlot:
         return _write(self.drawing, output_file, self.output_format, dpi=288*self.scale)
 
     def _draw_marks_mismatch(self, plot_index: int, mismatches: dict[int: list], is_reference: bool=False) -> None:
-        """ Draw marks for a mismatch sequence """
+        """Render mismatch marks and symbolic overlays for a single sequence track.
+
+        Draws filled rectangles for nucleotide/amino acid mismatches and
+        overlays symbolic markers (circles or diamonds) for special mutation
+        types. Adjacent identical marks are merged into a single wider
+        rectangle for visual clarity.
+
+        Parameters
+        ----------
+        plot_index : int
+            Zero-based vertical position of this track in the figure
+            (0 = topmost visible track).
+        mismatches : dict
+            Mismatch annotation dictionary as returned by
+            :meth:`Highlighter.get_mismatches_from_str`.
+        is_reference : bool, optional
+            If ``True``, this track belongs to the reference sequence and
+            symbolic glycosylation markers are drawn differently
+            (default ``False``).
+        """
 
         already_processed: list = []
         for base, mismatch_item in mismatches.items():
@@ -632,7 +1187,54 @@ class HighlighterPlot:
                     self.draw_diamond(x, y, color="#0000FF")
 
     def draw_matches(self, output_file, *, output_format: str="svg", title: str=None, references: list[Union[str, int]]=0, sort: str="similar", mark_width: float=1, scheme: Union[str, dict]="LANL", scale: float=1, sequence_labels: bool=True):
-        """ Draw mismatches compared to a reference sequence """
+        """Generate a match highlighter plot and write it to a file.
+
+        Each sequence track displays coloured marks at positions that are
+        identical to one or more reference sequences. Mark colour indicates
+        which reference is matched; positions shared with multiple references
+        or unique to the query use configurable colours.
+
+        Parameters
+        ----------
+        output_file : str or path-like
+            Destination file path.
+        output_format : str, optional
+            Output format string (default ``'svg'``).
+        title : str or None, optional
+            Title drawn above the plot (default ``None``).
+        references : int, str, or list thereof, optional
+            One or more reference sequences by index or identifier
+            (default ``0``).
+        sort : {'similar', 'tree', 'none'}, optional
+            Sequence ordering strategy (default ``'similar'``).
+        mark_width : float, optional
+            Fractional mark width relative to one alignment column
+            (default ``1``).
+        scheme : str or dict, optional
+            Colour scheme. Pass a built-in scheme name (``'LANL'`` or
+            ``'ML'``) or a dictionary with keys ``'references'``
+            (list of hex colour strings), ``'unique'`` (hex string or
+            ``None``), and ``'multiple'`` (hex string or ``None``).
+            Default is ``'LANL'``.
+        scale : float, optional
+            Output DPI scaling factor (default ``1``).
+        sequence_labels : bool, optional
+            Draw sequence identifiers to the right of the plot
+            (default ``True``).
+
+        Returns
+        -------
+        object
+            The return value of ``Bio.Graphics._write``.
+
+        Raises
+        ------
+        ValueError
+            If a string scheme name is not recognised, or if a dict scheme
+            is missing required keys or empty reference colours.
+        TypeError
+            If ``scheme`` is neither a str nor a dict.
+        """
 
         self._mutations = AlignInfo.Highlighter(self.alignment, seq_type=self.seq_type)
         
@@ -678,7 +1280,24 @@ class HighlighterPlot:
         return _write(self.drawing, output_file, self.output_format, dpi=288*self.scale)
 
     def _draw_marks_match(self, plot_index: int, matches: dict[int, list], is_reference: bool) -> None:
-        """ Draw the marks for a match sequence """
+        """Render match marks for a single sequence track.
+
+        Draws coloured rectangles at positions where the query matches a
+        reference. Adjacent identical marks are merged into a single wider
+        rectangle. Three mutually exclusive mark categories are handled in
+        priority order: unique positions, multi-reference matches, and
+        single-reference matches.
+
+        Parameters
+        ----------
+        plot_index : int
+            Zero-based vertical position of this track in the figure.
+        matches : dict
+            Match annotation dictionary as returned by
+            :meth:`Highlighter.get_matches_from_str`.
+        is_reference : bool
+            Unused currently; reserved for future reference-track styling.
+        """
 
         already_processed: dict[list] = {"Unique": [], "Multiple": [], "Single": []}
         for base, match_item in matches.items():
@@ -729,8 +1348,25 @@ class HighlighterPlot:
 
                         self.drawing.add(self._base_mark(plot_index, base, color, width=width))
 
-    def _base_mark(self, plot_index, base, color, width: int=1) -> Rect:
-        """ Returns a mark for a particular base """
+    def _base_mark(self, plot_index: int, base: int, color: Color, width: int=1) -> Rect:
+        """Construct a filled rectangle mark for one or more consecutive bases.
+
+        Parameters
+        ----------
+        plot_index : int
+            Zero-based vertical position of this track in the figure.
+        base : int
+            Zero-based alignment position of the leftmost column to mark.
+        color : Color
+            ReportLab ``Color`` instance for both the fill and stroke.
+        width : int, optional
+            Number of consecutive alignment columns to span (default ``1``).
+
+        Returns
+        -------
+        Rect
+            A ReportLab ``Rect`` object ready to be added to the drawing.
+        """
 
         x1: float = self.left_margin + self._base_left(base)
         x2: float = self.left_margin + self._base_left(base + (width - 1) + self.mark_width )
@@ -741,7 +1377,12 @@ class HighlighterPlot:
         return Rect(x1, y1, x2-x1, y2-y1, fillColor=color, strokeColor=color, strokeWidth=0.1)
 
     def _draw_title(self) -> None:
-        """ Draw the title at the top of the plot """
+        """Draw the plot title centred above the sequence tracks.
+
+        Has no effect if ``self.title`` is ``None`` or an empty string.
+        The title is positioned relative to the top margin using the
+        configured title font and font size.
+        """
             
         if self.title:
             x: float = self.left_margin + (self.plot_width/2)
@@ -750,7 +1391,14 @@ class HighlighterPlot:
             self.drawing.add(String(x, y, self.title, textAnchor="middle", fontName=self.title_font, fontSize=self.title_font_size))
 
     def _draw_ruler(self) -> None:
-        """ Draw the ruler at the bottom of the plot """
+        """Draw the position ruler along the bottom of the plot.
+
+        For alignments of 20 columns or fewer every position is labelled.
+        For longer alignments, major tick positions are distributed evenly
+        across the sequence, rounded to significant digits, with minor ticks
+        interpolated between them. A solid horizontal line is drawn across
+        the full plot width at the top of the tick marks.
+        """
 
         if self._seq_length <= 20:
             self._ruler_marks(range(self._seq_length))
@@ -776,7 +1424,14 @@ class HighlighterPlot:
         self.drawing.add(ruler_line)
 
     def _ruler_marks(self, marked_bases: list) -> None:
-        """ Draw marks on the ruler """
+        """Draw major tick marks and labels, and interpolate minor ticks between them.
+
+        Parameters
+        ----------
+        marked_bases : list of int
+            Zero-based alignment positions at which to place major ticks
+            and numeric labels.
+        """
 
         mark_locations: list = []
 
@@ -792,9 +1447,19 @@ class HighlighterPlot:
                         self._ruler_light_tick(left + (tick * spacing))
                     
 
-    def _ruler_label(self, base: int) -> tuple[float]:
-        """ Draw a label on the ruler
-         returns the coordinates of the label """
+    def _ruler_label(self, base: int) -> tuple[float, float]:
+        """Draw a 1-based numeric label on the ruler at the given alignment position.
+
+        Parameters
+        ----------
+        base : int
+            Zero-based alignment position. The displayed label is ``base + 1``.
+
+        Returns
+        -------
+        tuple of float
+            ``(x, y)`` coordinates of the label anchor in ReportLab units.
+        """
 
         x: float = self.left_margin + self._base_center(base)
         y: float = self.bottom_margin+self._ruler_font_height
@@ -803,9 +1468,19 @@ class HighlighterPlot:
 
         return (x, y)
 
-    def _ruler_heavy_tick(self, base: int) -> tuple[float]:
-        """ Draw a heavy tick on the ruler
-        returns the x, top, and bottom of the tick """
+    def _ruler_heavy_tick(self, base: int) -> tuple[float, float, float]:
+        """Draw a major (heavy) tick mark on the ruler at the given alignment position.
+
+        Parameters
+        ----------
+        base : int
+            Zero-based alignment position.
+
+        Returns
+        -------
+        tuple of float
+            ``(x, top, bottom)`` coordinates of the tick line in ReportLab units.
+        """
 
         x: float = self.left_margin + self._base_center(base)
         top: float = self.bottom_margin + (self._ruler_font_height * 3)
@@ -815,10 +1490,25 @@ class HighlighterPlot:
 
         return (x, top, bottom)
 
-    def _ruler_light_tick(self, x: float) -> tuple[float]:
-        """ Draw a light tick on the ruler 
-        x is the raw x, including the _left_margin
-        returns the x, top, and bottom of the tick"""
+    def _ruler_light_tick(self, x: float) -> tuple[float, float, float]:
+        """Draw a minor (light) tick mark on the ruler at the given x coordinate.
+
+        Unlike :meth:`_ruler_heavy_tick`, this method accepts an absolute
+        x coordinate (including the left margin) rather than an alignment
+        position, because minor ticks are interpolated between major tick
+        positions.
+
+        Parameters
+        ----------
+        x : float
+            Absolute x coordinate in ReportLab units (left margin already
+            included).
+
+        Returns
+        -------
+        tuple of float
+            ``(x, top, bottom)`` coordinates of the tick line in ReportLab units.
+        """
 
         top: float = self.bottom_margin + (self._ruler_font_height * 3)
         bottom: float = self.bottom_margin + (self._ruler_font_height * 2.5)
@@ -828,7 +1518,22 @@ class HighlighterPlot:
         return (x, top, bottom)
 
     def _base_left(self, base: int) -> float:
-        """ Get the left coordinate of a base """
+        """Return the left edge x coordinate of an alignment column, relative to the plot origin.
+
+        The value does *not* include ``left_margin``; callers must add it
+        explicitly when placing elements on the drawing.
+
+        Parameters
+        ----------
+        base : int
+            Zero-based alignment column index.
+
+        Returns
+        -------
+        float
+            X coordinate in ReportLab units, measured from the left edge of
+            the plot area (i.e. excluding the left margin).
+        """
 
         # if base == self._seq_length:
         #     return self.plot_width
@@ -836,7 +1541,19 @@ class HighlighterPlot:
         return (base / self._seq_length) * self.plot_width
     
     def _base_center(self, base: int) -> float:
-        """ Get the center coordinate of a base """
+        """Return the centre x coordinate of an alignment column, relative to the plot origin.
+
+        Parameters
+        ----------
+        base : int
+            Zero-based alignment column index.
+
+        Returns
+        -------
+        float
+            X coordinate in ReportLab units, measured from the left edge of
+            the plot area (i.e. excluding the left margin).
+        """
 
         left_x: float = self._base_left(base)
         right_x: float = self._base_left(base + 1)
@@ -845,7 +1562,19 @@ class HighlighterPlot:
     
     @property
     def _max_seq_name_width(self) -> float:
-        """ Get the width of the longest sequence name """
+        """Return the rendered pixel width of the longest sequence label.
+
+        Accounts for the reference indicator suffix (``' (r)'`` for mismatch
+        plots; ``' (r10)'`` for match plots, sizing for up to 10 references)
+        so that the label column is wide enough for all sequences including
+        the reference.
+
+        Returns
+        -------
+        float
+            Maximum label width in ReportLab units as reported by
+            ``reportlab.pdfbase.pdfmetrics.stringWidth``.
+        """
 
         max_width: float = 0
         if self.plot_type == "match":
@@ -861,20 +1590,59 @@ class HighlighterPlot:
         return max_width
     
     def _hex_to_color(self, hex: str) -> Color:
-        """ Convert a hex color to rgb """
+        """Convert a CSS hex colour string to a ReportLab ``Color`` object.
+
+        Parameters
+        ----------
+        hex : str
+            Six-digit hexadecimal colour string, with or without a leading
+            ``'#'`` (e.g. ``'#FF0000'`` or ``'FF0000'``).
+
+        Returns
+        -------
+        Color
+            ReportLab ``Color`` with ``r``, ``g``, ``b`` components in the
+            range [0, 1].
+        """
 
         hex = hex.lstrip("#")
         color_list = [int(hex[i:i+2], 16)/256 for i in (0, 2, 4)]
         return Color(color_list[0], color_list[1], color_list[2])
     
     def _sort_similar(self) -> list[int]:
-        """ Sort sequences by similarity to the reference sequence 
-        returns list of indexes"""
+        """Return alignment indices sorted by ascending number of annotated positions.
+
+        Sequences with fewer annotated positions (i.e. more similar to the
+        reference) are placed first. This mirrors the display convention of
+        the LANL highlighter tool.
+
+        Returns
+        -------
+        list of int
+            Alignment indices in ascending order of ``len(matches_list[i])``.
+        """
 
         return sorted(range(len(self.matches_list)), key=lambda x: len(self.matches_list[x]))
     
     def draw_diamond(self, x: float, y: float, color: str="#FF00FF", filled: bool=False) -> None:
-        """ Draw a rectangle on the plot """
+        """Draw a diamond-shaped marker on the plot at the given coordinates.
+
+        Used to overlay symbolic annotations such as G→A mutations, gained
+        glycosylation sites, and stop codons on top of sequence tracks.
+
+        Parameters
+        ----------
+        x : float
+            Absolute x coordinate of the diamond centre in ReportLab units.
+        y : float
+            Absolute y coordinate of the diamond centre in ReportLab units.
+        color : str, optional
+            Hex colour string for the diamond stroke (and fill, if
+            ``filled=True``) (default ``'#FF00FF'``).
+        filled : bool, optional
+            If ``True``, the diamond interior is filled with ``color``;
+            otherwise it is transparent (default ``False``).
+        """
         
         fill_color = self._hex_to_color(color) if filled else None
 
@@ -883,13 +1651,45 @@ class HighlighterPlot:
         self.drawing.add(diamond)
 
     def draw_circle(self, x: float, y: float, color: str="#FF00FF", filled: bool=True) -> None:
-        """ Draw a circle on the plot"""
+        """Draw a circle marker on the plot at the given coordinates.
+
+        Used to overlay symbolic annotations such as APOBEC mutations and
+        reference glycosylation sites on top of sequence tracks.
+
+        Parameters
+        ----------
+        x : float
+            Absolute x coordinate of the circle centre in ReportLab units.
+        y : float
+            Absolute y coordinate of the circle centre in ReportLab units.
+        color : str, optional
+            Hex colour string for the circle fill (default ``'#FF00FF'``).
+        filled : bool, optional
+            Currently unused; the circle is always drawn filled
+            (default ``True``).
+        """
         
         circle = Circle(x, y, (self._seq_height/3)/2, fillColor=self._hex_to_color(color), strokeColor=self._hex_to_color("#FF00FF"), strokeWidth=0.1)
         self.drawing.add(circle)
     
     def _get_index_by_id(self, id: str) -> int:
-        """ Get the index of a sequence by its id """
+        """Return the alignment index of a sequence by its identifier.
+
+        Parameters
+        ----------
+        id : str
+            The sequence identifier to search for (matches ``SeqRecord.id``).
+
+        Returns
+        -------
+        int
+            Zero-based index of the matching sequence in the alignment.
+
+        Raises
+        ------
+        IndexError
+            If no sequence with the given identifier is found.
+        """
 
         for index, sequence in enumerate(self.alignment):
             if sequence.id == id:
@@ -898,7 +1698,21 @@ class HighlighterPlot:
         raise IndexError(f"Sequence with id '{id}' not found")
     
     def _indexes_by_tree_order(self) -> list[int]:
-        """ Get the indexes of the sequences in the order they appear in the tree """
+        """Return alignment indices in the order of terminal nodes in the phylogenetic tree.
+
+        Used when ``sort='tree'`` is requested in a draw method. Terminal
+        names in the tree must match sequence identifiers in the alignment.
+
+        Returns
+        -------
+        list of int
+            Alignment indices ordered according to ``self.tree.get_terminals()``.
+
+        Raises
+        ------
+        IndexError
+            If a terminal name in the tree cannot be found in the alignment.
+        """
 
         indexes: list[int] = []
 
@@ -909,7 +1723,32 @@ class HighlighterPlot:
     
     @staticmethod
     def significant_digits(value: float, digits: int=2) -> float:
-        """ Round a number to a certain number of significant digits """
+        """Round a positive integer down to a given number of significant digits.
+
+        Used to produce round ruler tick positions (e.g. 987 → 980 with two
+        significant digits). Only positive values are rounded; zero and
+        negative values are returned unchanged.
+
+        Parameters
+        ----------
+        value : float
+            The value to round.
+        digits : int, optional
+            Number of significant digits to retain (default ``2``).
+
+        Returns
+        -------
+        float
+            The rounded value, or ``value`` unchanged if it has fewer digits
+            than ``digits`` or is non-positive.
+
+        Examples
+        --------
+        >>> HighlighterPlot.significant_digits(987)
+        980
+        >>> HighlighterPlot.significant_digits(1234, digits=3)
+        1230
+        """
 
         if value == 0:
             return 0
@@ -927,7 +1766,29 @@ class HighlighterPlot:
     
     @staticmethod
     def guess_alignment_type(alignment) -> str:
-        """ Returns either 'NT' (nucleotide) or 'AA' (amino acid) """
+        """Infer whether an alignment contains nucleotide or amino acid sequences.
+
+        Scans every sequence for characters that fall outside the IUPAC
+        nucleotide alphabet. If any such character is found the alignment is
+        classified as amino acid; otherwise it is classified as nucleotide.
+
+        Parameters
+        ----------
+        alignment : list-like of str, Seq, or SeqRecord
+            The sequences to inspect.
+
+        Returns
+        -------
+        str
+            ``'NT'`` if all characters are valid IUPAC nucleotide codes,
+            ``'AA'`` otherwise.
+
+        Notes
+        -----
+        The IUPAC nucleotide codes recognised are: ``A C G T U i R Y K M S W
+        B D H V N -``. The gap character ``'-'`` is treated as a nucleotide
+        code so that pre-aligned sequences are handled correctly.
+        """
 
         nt_codes: str = "ACGTUiRYKMSWBDHVN-" # IUPAC nucleotide codes
 
@@ -952,8 +1813,53 @@ from Bio import SeqUtils
 
 @cache
 def codon_position(sequence: Union[str, Seq, SeqRecord], base: int, *, codon_offset: int=0) -> int:
-    """ Get the codon position of a base in a sequence
-    returns 0 for the first base of a codon, 1 for the second, or 2 for the third) """
+    """Return the codon position of a residue in an alignment, accounting for gaps.
+
+    Determines whether the residue at ``base`` is the 1st, 2nd, or 3rd
+    position within its codon. Gap characters (``'-'``) in the sequence
+    before ``base`` are excluded from the position count so that the reading
+    frame is preserved across indels.
+
+    This function is registered into the Biopython namespace as
+    ``Bio.SeqUtils.codon_position`` and is also used internally by
+    :meth:`Highlighter.get_mismatches_from_str` for stop codon detection.
+
+    Results are cached via :func:`functools.cache` for performance.
+
+    Parameters
+    ----------
+    sequence : str, Seq, or SeqRecord
+        The aligned nucleotide sequence containing the residue of interest.
+    base : int
+        Zero-based index of the residue within ``sequence``.
+    codon_offset : int, optional
+        Reading frame offset to apply (default ``0``). A value of ``1``
+        indicates the first base of the sequence is the second position of
+        a codon, and so on. The offset is applied after gap adjustment.
+
+    Returns
+    -------
+    int
+        Codon position: ``0`` for the first base of a codon, ``1`` for the
+        second, or ``2`` for the third.
+
+    Raises
+    ------
+    TypeError
+        If ``sequence`` is not a str, Seq, or SeqRecord, or if ``base`` is
+        not an int.
+    ValueError
+        If ``base`` exceeds the length of ``sequence``, or if the residue at
+        ``base`` is a gap character.
+
+    Examples
+    --------
+    >>> from Bio import SeqUtils
+    >>> SeqUtils.codon_position("ATG---TTA", 6)
+    0
+    >>> SeqUtils.codon_position("ATG---TTA", 7)
+    1
+    """
 
     if isinstance(sequence, Seq):
             sequence = str(sequence)
