@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "highlighter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Plot point mutations and APOBEC signatures for a multisequence alignment"
 dependencies = ["biopython", "reportlab"]
 

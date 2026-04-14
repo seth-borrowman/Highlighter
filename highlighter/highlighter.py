@@ -915,13 +915,13 @@ class HighlighterPlot:
             }
         }
 
-    def _setup_drawing(self, *, plot_type: str, output_format: str="svg", title: str=None, sort: str="similar", mark_width: float=1, scale: float=1, sequence_labels: bool=True):
+    def _setup_drawing(self, *, plot_type: str, output_format: str="svg", title: str=None, sort: str="similar", mark_width: float=1, scale: float=1, sequence_labels: bool=True, legend_entries: list=None):
         """Configure and initialise the ReportLab Drawing object.
 
         Calculates overall figure dimensions, creates the
-        :class:`~reportlab.graphics.shapes.Drawing`, draws the title and
-        ruler (if enabled), adds sequence baselines, and resolves the
-        display order of sequences.
+        :class:`~reportlab.graphics.shapes.Drawing`, draws the title,
+        legend (if entries are provided), and ruler (if enabled), adds
+        sequence baselines, and resolves the display order of sequences.
 
         This method is called internally by :meth:`draw_mismatches` and
         :meth:`draw_matches` before marks are rendered.
@@ -948,6 +948,10 @@ class HighlighterPlot:
         sequence_labels : bool, optional
             If ``True``, draw sequence identifiers to the right of the plot
             (default ``True``).
+        legend_entries : list of tuple or None, optional
+            Pre-built legend entries as ``(label, color_hex, shape)`` tuples,
+            where ``shape`` is ``'rect'``, ``'circle'``, or ``'diamond'``.
+            If ``None`` or empty, no legend is drawn (default ``None``).
 
         Raises
         ------
@@ -955,7 +959,7 @@ class HighlighterPlot:
             If ``sort='tree'`` is requested but no tree was provided at
             initialisation.
         """
-        
+
         self.plot_type: str = plot_type
         self.output_format: str = output_format
 
@@ -963,14 +967,35 @@ class HighlighterPlot:
         self._title_font_height: float = self.title_font_size
         self._title_height = 0 if not title else self._title_font_height*2
 
+        self._legend_entries: list = legend_entries or []
+
         self._ruler_height = 0 if not self.ruler else self._ruler_font_height * 3
 
         self._plot_floor: float = self.bottom_margin + self._ruler_height
 
+        # Legend sizing — must be calculated before _height so space is reserved
+        self._legend_swatch_size: float = self._seq_height * 1.5
+        self._legend_padding: float = self._legend_swatch_size * 0.5
+        self._legend_font_size: float = self.seq_name_font_size
+
+        if self._legend_entries:
+            self._legend_rows: int = self._compute_legend_rows(self._legend_entries)
+            self._legend_height: float = (
+                self._legend_rows * (self._legend_swatch_size + self._legend_padding)
+                + self._legend_padding
+            )
+        else:
+            self._legend_rows = 0
+            self._legend_height = 0
+
         self._seq_name_width: float = self._max_seq_name_width if sequence_labels else 0
         self._width: float = self.left_margin + self.plot_width + self.plot_label_gap + self._seq_name_width + self.right_margin
-        
-        self._height: float = len(self.alignment) * (self._seq_height + self.seq_gap) + self.top_margin + self.bottom_margin + self._title_height + self._ruler_height
+
+        self._height: float = (
+            len(self.alignment) * (self._seq_height + self.seq_gap)
+            + self.top_margin + self.bottom_margin
+            + self._title_height + self._legend_height + self._ruler_height
+        )
 
         self.mark_width: float = mark_width
 
@@ -991,6 +1016,8 @@ class HighlighterPlot:
             self.sorted_keys = range(len(self.matches_list))
 
         self._draw_title()
+        if self._legend_entries:
+            self._draw_legend()
         if self.ruler:
             self._draw_ruler()
 
@@ -1043,7 +1070,7 @@ class HighlighterPlot:
             sequence_baseline: Line = Line(x1, y, x2, y, strokeColor=color)
             self.drawing.add(sequence_baseline)
     
-    def draw_mismatches(self, output_file, *, output_format: str="svg", title: str=None, reference: Union[str, int]=0, apobec: bool=False, g_to_a: bool=False, stop_codons: bool=False, glycosylation: bool=False, sort: str="similar", mark_width: float=1, scheme: str="LANL", scale: float=1, sequence_labels: bool=True):
+    def draw_mismatches(self, output_file, *, output_format: str="svg", title: str=None, reference: Union[str, int]=0, apobec: bool=False, g_to_a: bool=False, stop_codons: bool=False, glycosylation: bool=False, sort: str="similar", mark_width: float=1, scheme: str="LANL", scale: float=1, sequence_labels: bool=True, legend: bool=True):
         """Generate a mismatch highlighter plot and write it to a file.
 
         Each sequence track displays coloured marks at positions that differ
@@ -1089,6 +1116,10 @@ class HighlighterPlot:
         sequence_labels : bool, optional
             Draw sequence identifiers to the right of the plot
             (default ``True``).
+        legend : bool, optional
+            If ``True``, draw a legend above the sequences showing only the
+            residues and markers that actually appear in the data
+            (default ``True``).
 
         Returns
         -------
@@ -1097,12 +1128,11 @@ class HighlighterPlot:
         """
 
         self._mutations = AlignInfo.Highlighter(self.alignment, seq_type=self.seq_type)
-        
+
         self.matches_list = self._mutations.list_mismatches(references=reference, apobec=apobec, g_to_a=g_to_a, stop_codons=stop_codons, glycosylation=glycosylation, codon_offset=self.codon_offset)
         self.references = self._mutations.references
 
-        self._setup_drawing(output_format=output_format, title=title, sort=sort, mark_width=mark_width, scale=scale, plot_type="mismatch", sequence_labels=sequence_labels)
-
+        # Scheme must be set before building legend entries and before _setup_drawing
         self.scheme: str = scheme
         self._current_scheme: dict = self.mismatch_plot_colors[self.seq_type][self.scheme] if self.scheme in self.mismatch_plot_colors[self.seq_type] else self.mismatch_plot_colors[self.seq_type]["LANL"]
 
@@ -1110,6 +1140,10 @@ class HighlighterPlot:
         self._g_to_a: bool = g_to_a
         self._glycosylation: bool = glycosylation
         self._stop_codons: bool = stop_codons
+
+        legend_entries = self._get_legend_entries_mismatch() if legend else []
+
+        self._setup_drawing(output_format=output_format, title=title, sort=sort, mark_width=mark_width, scale=scale, plot_type="mismatch", sequence_labels=sequence_labels, legend_entries=legend_entries)
 
         for plot_index, seq_index in enumerate(self.sorted_keys):
             matches = self.matches_list[seq_index]
@@ -1186,7 +1220,7 @@ class HighlighterPlot:
 
                     self.draw_diamond(x, y, color="#0000FF")
 
-    def draw_matches(self, output_file, *, output_format: str="svg", title: str=None, references: list[Union[str, int]]=0, sort: str="similar", mark_width: float=1, scheme: Union[str, dict]="LANL", scale: float=1, sequence_labels: bool=True):
+    def draw_matches(self, output_file, *, output_format: str="svg", title: str=None, references: list[Union[str, int]]=0, sort: str="similar", mark_width: float=1, scheme: Union[str, dict]="LANL", scale: float=1, sequence_labels: bool=True, legend: bool=True):
         """Generate a match highlighter plot and write it to a file.
 
         Each sequence track displays coloured marks at positions that are
@@ -1221,6 +1255,10 @@ class HighlighterPlot:
         sequence_labels : bool, optional
             Draw sequence identifiers to the right of the plot
             (default ``True``).
+        legend : bool, optional
+            If ``True``, draw a legend above the sequences showing only the
+            residues and markers that actually appear in the data
+            (default ``True``).
 
         Returns
         -------
@@ -1237,13 +1275,14 @@ class HighlighterPlot:
         """
 
         self._mutations = AlignInfo.Highlighter(self.alignment, seq_type=self.seq_type)
-        
+
         self.matches_list = self._mutations.list_matches(references=references)
         self.references = self._mutations.references
 
+        # Scheme must be set before building legend entries and before _setup_drawing
         if isinstance(scheme, str):
             self.scheme: str = scheme
-    
+
             if self.scheme not in self.match_plot_colors:
                 raise ValueError(f"Scheme {self.scheme} is not a valid scheme")
 
@@ -1254,16 +1293,16 @@ class HighlighterPlot:
         elif isinstance(scheme, dict):
             if "references" not in scheme or "unique" not in scheme or "multiple" not in scheme:
                 raise ValueError("Scheme dictionary must contain 'references', 'unique', and 'multiple' keys")
-            
+
             if not scheme["references"]:
                 raise ValueError("Scheme dictionary must contain at least one 'reference' color")
 
             if "multiple" not in scheme or (scheme["multiple"] is not None and not scheme["multiple"]):
                 raise ValueError("Scheme dictionary must contain a 'multiple' color")
-            
+
             if "unique" not in scheme or (scheme["unique"] is not None and not scheme["unique"]):
                 raise ValueError("Scheme dictionary must contain a 'unique' color")
-            
+
             self._current_scheme: list = scheme["references"]
             self._current_unique_color: str = scheme["unique"]
             self._current_multiple_color: str = scheme["multiple"]
@@ -1271,13 +1310,245 @@ class HighlighterPlot:
         else:
             raise TypeError("scheme must be a string or a dictionary")
 
-        self._setup_drawing(output_format=output_format, title=title, sort=sort, mark_width=mark_width, scale=scale, plot_type="match", sequence_labels=sequence_labels)
+        legend_entries = self._get_legend_entries_match() if legend else []
+
+        self._setup_drawing(output_format=output_format, title=title, sort=sort, mark_width=mark_width, scale=scale, plot_type="match", sequence_labels=sequence_labels, legend_entries=legend_entries)
 
         for plot_index, seq_index in enumerate(self.sorted_keys):
             matches = self.matches_list[seq_index]
             self._draw_marks_match(plot_index, matches, is_reference=(seq_index in self.references))
 
         return _write(self.drawing, output_file, self.output_format, dpi=288*self.scale)
+
+    def _get_legend_entries_mismatch(self) -> list[tuple]:
+        """Build ordered legend entries from the mismatch data actually present.
+
+        Scans ``self.matches_list`` to find which residues and special
+        annotation types appear in the data. For nucleotide alignments
+        residues are listed in canonical order (A, C, G, T/U, Gap). For
+        amino acid alignments, residues sharing the same colour in the active
+        scheme are grouped into a single entry with a combined label
+        (e.g. ``'I/L/V'``), greatly reducing legend clutter.
+
+        Symbolic marker entries (APOBEC, G→A, stop codon, glycosylation) are
+        appended after residue entries, but only when the corresponding flag
+        was enabled and the marker actually appears in the data.
+
+        Returns
+        -------
+        list of tuple
+            Ordered ``(label, color_hex, shape)`` tuples where ``shape`` is
+            one of ``'rect'``, ``'circle'``, or ``'diamond'``.
+        """
+
+        # Collect residues and special codes that actually appear
+        seen_residues: set = set()
+        seen_specials: set = set()
+
+        for seq_mismatches in self.matches_list:
+            for annotations in seq_mismatches.values():
+                seen_residues.add(annotations[0])
+                for code in annotations[1:]:
+                    seen_specials.add(code)
+
+        entries: list = []
+
+        if self.seq_type == "NT":
+            nt_order = ["A", "C", "G", "T", "U", "Gap"]
+            for residue in nt_order:
+                if residue in seen_residues and residue in self._current_scheme:
+                    entries.append((residue, self._current_scheme[residue], "rect"))
+
+        else:  # AA — group residues by colour
+            # Invert the colour map: hex -> [residues with that colour]
+            color_to_residues: dict = {}
+            for residue, hex_color in self._current_scheme.items():
+                if residue in seen_residues:
+                    color_to_residues.setdefault(hex_color, []).append(residue)
+
+            # Preserve scheme insertion order for group ordering
+            seen_colors: list = []
+            for residue in self._current_scheme:
+                hex_color = self._current_scheme[residue]
+                if hex_color in color_to_residues and hex_color not in seen_colors:
+                    seen_colors.append(hex_color)
+
+            for hex_color in seen_colors:
+                residues = color_to_residues[hex_color]
+                label = "/".join(sorted(residues))
+                entries.append((label, hex_color, "rect"))
+
+            if "Gap" in seen_residues and "Gap" in self._current_scheme:
+                entries.append(("Gap", self._current_scheme["Gap"], "rect"))
+
+        # Symbolic markers — only if enabled and present in data
+        if self._g_to_a and "G->A mutation" in seen_specials:
+            entries.append(("G→A", "#FF00FF", "diamond"))
+
+        if self._apobec and "APOBEC" in seen_specials:
+            entries.append(("APOBEC", "#FF00FF", "circle"))
+
+        if self._stop_codons and "Stop codon" in seen_specials:
+            entries.append(("Stop codon", "#0000FF", "diamond"))
+
+        if self._glycosylation and "Glycosylation" in seen_specials:
+            entries.append(("Glycosylation (gained)", "#FF00FF", "diamond_filled"))
+            entries.append(("Glycosylation (ref)", "#FF00FF", "circle"))
+            entries.append(("Glycosylation (lost)", "#0000FF", "diamond"))
+
+        return entries
+
+    def _get_legend_entries_match(self) -> list[tuple]:
+        """Build ordered legend entries from the match data actually present.
+
+        Scans ``self.matches_list`` to find which reference indices, and
+        whether ``'Unique'`` or ``'Multiple'`` categories appear. Entries are
+        ordered R1, R2, … followed by Multiple then Unique, omitting any that
+        do not appear in the data.
+
+        Returns
+        -------
+        list of tuple
+            Ordered ``(label, color_hex, shape)`` tuples.
+        """
+
+        seen_refs: set = set()
+        has_unique: bool = False
+        has_multiple: bool = False
+
+        for seq_matches in self.matches_list:
+            for annotations in seq_matches.values():
+                if "Unique" in annotations:
+                    has_unique = True
+                elif len(annotations) > 1:
+                    has_multiple = True
+                else:
+                    seen_refs.update(i for i in annotations if isinstance(i, int))
+
+        entries: list = []
+
+        for ref_index in sorted(seen_refs):
+            if ref_index < len(self._current_scheme) and self._current_scheme[ref_index] is not None:
+                label = f"R{ref_index + 1}"
+                entries.append((label, self._current_scheme[ref_index], "rect"))
+
+        if has_multiple and self._current_multiple_color is not None:
+            entries.append(("Multiple", self._current_multiple_color, "rect"))
+
+        if has_unique and self._current_unique_color is not None:
+            entries.append(("Unique", self._current_unique_color, "rect"))
+
+        return entries
+
+    def _compute_legend_rows(self, entries: list) -> int:
+        """Return the number of rows needed to lay out legend entries across the plot width.
+
+        Each entry occupies a swatch plus its label text. Entries are packed
+        left-to-right and wrap onto a new row when they would exceed
+        ``self.plot_width``.
+
+        Parameters
+        ----------
+        entries : list of tuple
+            Legend entries as ``(label, color_hex, shape)`` tuples.
+
+        Returns
+        -------
+        int
+            Number of rows required (minimum 1 if entries is non-empty).
+        """
+
+        x: float = 0
+        rows: int = 1
+        swatch: float = self._legend_swatch_size
+        gap: float = self._legend_padding
+
+        for label, _, _ in entries:
+            label_width: float = stringWidth(label, self.seq_name_font, self._legend_font_size)
+            entry_width: float = swatch + gap + label_width + gap * 2
+
+            if x + entry_width > self.plot_width and x > 0:
+                rows += 1
+                x = 0
+
+            x += entry_width
+
+        return rows
+
+    def _draw_legend(self) -> None:
+        """Render the legend between the title and the sequence tracks.
+
+        Lays out coloured swatches (rectangles, circles, or diamonds) with
+        text labels in rows across the plot width. The legend is positioned
+        immediately below the title (or below the top margin if there is no
+        title), and the sequence tracks begin below it.
+
+        The vertical position of the legend is derived from ``_height``,
+        ``top_margin``, and ``_title_height``, matching the coordinate system
+        used by ``_draw_title`` and the sequence baselines.
+        """
+
+        swatch: float = self._legend_swatch_size
+        pad: float = self._legend_padding
+        font_size: float = self._legend_font_size
+
+        # Top of the legend block in drawing coordinates
+        legend_top: float = self._height - self.top_margin - self._title_height - pad
+
+        x: float = self.left_margin
+        row: int = 0
+
+        for label, hex_color, shape in self._legend_entries:
+            label_width: float = stringWidth(label, self.seq_name_font, font_size)
+            entry_width: float = swatch + pad + label_width + pad * 2
+
+            if x + entry_width > self.left_margin + self.plot_width and x > self.left_margin:
+                row += 1
+                x = self.left_margin
+
+            # Vertical centre of this row's swatch
+            y_centre: float = legend_top - (row * (swatch + pad)) - swatch / 2
+
+            color: Color = self._hex_to_color(hex_color)
+
+            if shape == "rect":
+                self.drawing.add(Rect(
+                    x, y_centre - swatch / 2,
+                    swatch, swatch,
+                    fillColor=color, strokeColor=color, strokeWidth=0.1,
+                ))
+            elif shape == "circle":
+                self.drawing.add(Circle(
+                    x + swatch / 2, y_centre, swatch / 2,
+                    fillColor=color, strokeColor=color, strokeWidth=0.1,
+                ))
+            elif shape == "diamond":
+                half: float = swatch / 2
+                self.drawing.add(Polygon(
+                    [x + half, y_centre - half,
+                     x,        y_centre,
+                     x + half, y_centre + half,
+                     x + swatch, y_centre],
+                    strokeColor=color, strokeWidth=2, fillColor=None,
+                ))
+            elif shape == "diamond_filled":
+                half: float = swatch / 2
+                self.drawing.add(Polygon(
+                    [x + half, y_centre - half,
+                     x,        y_centre,
+                     x + half, y_centre + half,
+                     x + swatch, y_centre],
+                    strokeColor=color, strokeWidth=2, fillColor=color,
+                ))
+
+            # Label to the right of the swatch
+            self.drawing.add(String(
+                x + swatch + pad, y_centre - font_size / 2,
+                label,
+                fontName=self.seq_name_font, fontSize=font_size,
+            ))
+
+            x += entry_width
 
     def _draw_marks_match(self, plot_index: int, matches: dict[int, list], is_reference: bool) -> None:
         """Render match marks for a single sequence track.
