@@ -974,8 +974,8 @@ class HighlighterPlot:
         self._plot_floor: float = self.bottom_margin + self._ruler_height
 
         # Legend sizing — must be calculated before _height so space is reserved
-        self._legend_swatch_size: float = self._seq_height * 1.5
-        self._legend_padding: float = self._legend_swatch_size * 0.5
+        self._legend_swatch_size: float = self._seq_height
+        self._legend_padding: float = self._legend_swatch_size * 0.25
         self._legend_font_size: float = self.seq_name_font_size
 
         if self._legend_entries:
